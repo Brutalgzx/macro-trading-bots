@@ -8,8 +8,6 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     ContextTypes
 )
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 import pytz
 
 # ─────────────────────────────────────────
@@ -1044,26 +1042,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────
 #  ALERTES AUTOMATIQUES
 # ─────────────────────────────────────────
-async def auto_briefing(app: Application):
+async def auto_briefing(context: ContextTypes.DEFAULT_TYPE):
     if not CHAT_ID:
         return
     logger.info("⏰ Alerte automatique : Briefing 07h00")
     result = await call_claude(PROMPTS["briefing_jour"]())
-    await send_long(app.bot, int(CHAT_ID), result, is_bot=True)
+    await send_long(context, int(CHAT_ID), result)
 
-async def auto_bilan(app: Application):
+async def auto_bilan(context: ContextTypes.DEFAULT_TYPE):
     if not CHAT_ID:
         return
     logger.info("⏰ Alerte automatique : Bilan 22h00")
     result = await call_claude(PROMPTS["bilan_jour"]())
-    await send_long(app.bot, int(CHAT_ID), result, is_bot=True)
+    await send_long(context, int(CHAT_ID), result)
 
-async def auto_mensuel(app: Application):
+async def auto_mensuel(context: ContextTypes.DEFAULT_TYPE):
     if not CHAT_ID:
         return
     logger.info("⏰ Alerte automatique : Analyse mensuelle 1er du mois")
     result = await call_claude(PROMPTS["analyse_mensuelle"]())
-    await send_long(app.bot, int(CHAT_ID), result, is_bot=True)
+    await send_long(context, int(CHAT_ID), result)
 
 
 # ─────────────────────────────────────────
@@ -1072,12 +1070,9 @@ async def auto_mensuel(app: Application):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Commandes de base
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("aide", cmd_aide))
     app.add_handler(CommandHandler("menu", cmd_menu))
-
-    # Modules terminal
     app.add_handler(CommandHandler("bilan", cmd_bilan))
     app.add_handler(CommandHandler("calendrier", cmd_calendrier))
     app.add_handler(CommandHandler("macro", cmd_macro))
@@ -1094,40 +1089,15 @@ def main():
     app.add_handler(CommandHandler("synthese", cmd_synthese))
     app.add_handler(CommandHandler("classement", cmd_classement))
     app.add_handler(CommandHandler("analyse_hebdo", cmd_analyse_hebdo))
-
-    # Nouvelles fonctions
     app.add_handler(CommandHandler("analyse", cmd_analyse))
     app.add_handler(CommandHandler("consensus", cmd_consensus))
     app.add_handler(CommandHandler("briefing", cmd_briefing))
     app.add_handler(CommandHandler("bilan_jour", cmd_bilan_jour))
     app.add_handler(CommandHandler("calendrier_mois", cmd_calendrier_mois))
     app.add_handler(CommandHandler("analyse_mensuelle", cmd_analyse_mensuelle))
-
-    # Boutons inline
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Planificateur alertes automatiques
-    tz = pytz.timezone(TIMEZONE)
-    scheduler = AsyncIOScheduler(timezone=tz)
-
-    scheduler.add_job(
-        auto_briefing,
-        CronTrigger(hour=7, minute=0, timezone=tz),
-        args=[app], id="briefing_matin"
-    )
-    scheduler.add_job(
-        auto_bilan,
-        CronTrigger(hour=22, minute=0, timezone=tz),
-        args=[app], id="bilan_soir"
-    )
-    scheduler.add_job(
-        auto_mensuel,
-        CronTrigger(day=1, hour=8, minute=0, timezone=tz),
-        args=[app], id="analyse_mensuelle_auto"
-    )
-
-    scheduler.start()
-    logger.info("✅ Bot démarré | Alertes : 07h00 · 22h00 · 1er du mois")
+    logger.info("Bot démarré")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
