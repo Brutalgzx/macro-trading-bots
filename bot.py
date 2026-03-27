@@ -806,7 +806,7 @@ Jamais de chiffre inventé."""
 # ─────────────────────────────────────────
 async def call_claude(prompt: str) -> str:
     tools = [{"type": "web_search_20250305", "name": "web_search"}]
-    for attempt in range(5):
+    for attempt in range(7):
         try:
             response = await client.messages.create(
                 model="claude-opus-4-5",
@@ -824,13 +824,13 @@ async def call_claude(prompt: str) -> str:
         except Exception as e:
             err = str(e)
             logger.warning(f"Tentative {attempt+1}/5 - Erreur Claude : {err}")
-            if "529" in err or "overloaded" in err.lower() or "rate" in err.lower():
-                wait = 10 * (attempt + 1)
+            if "529" in err or "overloaded" in err.lower() or "rate" in err.lower() or "529" in err or "quota" in err.lower():
+                wait = 20 * (attempt + 1)  # 20s, 40s, 60s, 80s, 100s
                 logger.info(f"Rate limit - attente {wait}s")
                 await asyncio.sleep(wait)
                 continue
             return f"Erreur API Claude\n\n{err}\n\nReessaie dans quelques instants."
-    return "API surchargee - Reessaie dans 1 minute."
+    return "API temporairement surchargee - Reessaie dans 2 minutes."
 
 
 async def send_long(bot_or_context, chat_id: int, text: str, is_bot=False):
