@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 from datetime import datetime
-from anthropic import Anthropic
+from anthropic import AsyncAnthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -24,7 +24,7 @@ ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY")
 CHAT_ID        = os.environ.get("CHAT_ID")
 TIMEZONE       = os.environ.get("TIMEZONE", "Europe/Paris")
 
-client = Anthropic(api_key=ANTHROPIC_KEY)
+client = AsyncAnthropic(api_key=ANTHROPIC_KEY)
 
 # ─────────────────────────────────────────
 #  PROMPT SYSTÈME INSTITUTIONNEL
@@ -806,8 +806,8 @@ Jamais de chiffre inventé."""
 # ─────────────────────────────────────────
 async def call_claude(prompt: str) -> str:
     try:
-        response = client.messages.create(
-            model="claude-opus-4-5-20251101",
+        response = await client.messages.create(
+            model="claude-sonnet-4-6",
             max_tokens=4000,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}]
@@ -850,7 +850,7 @@ async def send_long(bot_or_context, chat_id: int, text: str, is_bot=False):
 
 
 async def run_module(update: Update, context: ContextTypes.DEFAULT_TYPE, module: str):
-    """Handler générique — envoie le message d'attente, génère, répond."""
+    """Handler générique — fonctionne pour commandes ET boutons inline."""
     titles = {
         "bilan": "Bilan N-1 + Arc de tendance",
         "calendrier": "Calendrier économique semaine",
@@ -873,8 +873,13 @@ async def run_module(update: Update, context: ContextTypes.DEFAULT_TYPE, module:
         "calendrier_mois": "Calendrier du mois",
         "analyse_mensuelle": "Analyse mensuelle complète",
     }
-    chat_id = update.effective_chat.id
     title = titles.get(module, module)
+
+    # Récupère le chat_id correctement selon le type d'update
+    if update.callback_query:
+        chat_id = update.callback_query.message.chat_id
+    else:
+        chat_id = update.effective_chat.id
 
     wait = await context.bot.send_message(
         chat_id=chat_id,
@@ -1036,7 +1041,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if module not in PROMPTS:
         await query.message.reply_text("❌ Module inconnu.")
         return
-    await run_module(query, context, module)
+    await run_module(update, context, module)
 
 
 # ─────────────────────────────────────────
@@ -1067,7 +1072,7 @@ async def auto_mensuel(context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────
-def main():
+async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -1098,8 +1103,11 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("Bot démarré")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
