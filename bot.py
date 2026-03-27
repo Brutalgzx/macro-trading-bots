@@ -805,17 +805,32 @@ Jamais de chiffre inventé."""
 #  UTILITAIRES
 # ─────────────────────────────────────────
 async def call_claude(prompt: str) -> str:
-    try:
-        response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text
-    except Exception as e:
-        logger.error(f"Erreur Claude : {e}")
-        return f"❌ *Erreur API Claude*\n\n{str(e)}\n\n_Réessaie dans quelques instants._"
+    tools = [{"type": "web_search_20250305", "name": "web_search"}]
+    for attempt in range(5):
+        try:
+            response = await client.messages.create(
+                model="claude-opus-4-5",
+                max_tokens=4000,
+                system=SYSTEM_PROMPT,
+                tools=tools,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            # Extraire uniquement les blocs texte (ignorer tool_use/tool_result)
+            text = ""
+            for block in response.content:
+                if hasattr(block, "type") and block.type == "text":
+                    text += block.text
+            return text if text else "Aucune reponse generee."
+        except Exception as e:
+            err = str(e)
+            logger.warning(f"Tentative {attempt+1}/5 - Erreur Claude : {err}")
+            if "529" in err or "overloaded" in err.lower() or "rate" in err.lower():
+                wait = 10 * (attempt + 1)
+                logger.info(f"Rate limit - attente {wait}s")
+                await asyncio.sleep(wait)
+                continue
+            return f"Erreur API Claude\n\n{err}\n\nReessaie dans quelques instants."
+    return "API surchargee - Reessaie dans 1 minute."
 
 
 async def send_long(bot_or_context, chat_id: int, text: str, is_bot=False):
@@ -1073,7 +1088,12 @@ async def auto_mensuel(context: ContextTypes.DEFAULT_TYPE):
 #  MAIN
 # ─────────────────────────────────────────
 async def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    tz = pytz.timezone(TIMEZONE)
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("aide", cmd_aide))
@@ -1101,6 +1121,39 @@ async def main():
     app.add_handler(CommandHandler("calendrier_mois", cmd_calendrier_mois))
     app.add_handler(CommandHandler("analyse_mensuelle", cmd_analyse_mensuelle))
     app.add_handler(CallbackQueryHandler(button_handler))
+
+    # ── Alertes automatiques ──────────────────────────────────────────────
+    if CHAT_ID and app.job_queue:
+        # Briefing 07h00 tous les jours du lundi au vendredi
+        app.job_queue.run_daily(
+            auto_briefing,
+            time=datetime.strptime("07:00", "%H:%M").replace(
+                tzinfo=tz
+            ).timetz(),
+            days=(0, 1, 2, 3, 4),
+            name="briefing_quotidien",
+        )
+        # Bilan 22h00 tous les jours du lundi au vendredi
+        app.job_queue.run_daily(
+            auto_bilan,
+            time=datetime.strptime("22:00", "%H:%M").replace(
+                tzinfo=tz
+            ).timetz(),
+            days=(0, 1, 2, 3, 4),
+            name="bilan_quotidien",
+        )
+        # Analyse mensuelle le 1er de chaque mois à 08h00
+        app.job_queue.run_monthly(
+            auto_mensuel,
+            when=datetime.strptime("08:00", "%H:%M").replace(
+                tzinfo=tz
+            ).timetz(),
+            day=1,
+            name="analyse_mensuelle_auto",
+        )
+        logger.info("✅ Alertes automatiques programmées")
+    else:
+        logger.warning("⚠️  CHAT_ID manquant ou job_queue indisponible — alertes auto désactivées")
 
     logger.info("Bot démarré")
     async with app:
