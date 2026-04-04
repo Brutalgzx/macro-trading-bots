@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 from datetime import datetime
-from anthropic import Anthropic
+from anthropic import AsyncAnthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -24,7 +24,7 @@ ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY")
 CHAT_ID        = os.environ.get("CHAT_ID")
 TIMEZONE       = os.environ.get("TIMEZONE", "Europe/Paris")
 
-client = Anthropic(api_key=ANTHROPIC_KEY)
+client = AsyncAnthropic(api_key=ANTHROPIC_KEY)
 
 # ─────────────────────────────────────────
 #  PROMPT SYSTÈME INSTITUTIONNEL
@@ -805,17 +805,45 @@ Jamais de chiffre inventé."""
 #  UTILITAIRES
 # ─────────────────────────────────────────
 async def call_claude(prompt: str) -> str:
-    try:
-        response = client.messages.create(
-            model="claude-opus-4-5-20251101",
-            max_tokens=4000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text
-    except Exception as e:
-        logger.error(f"Erreur Claude : {e}")
-        return f"❌ *Erreur API Claude*\n\n{str(e)}\n\n_Réessaie dans quelques instants._"
+    tools = [{"type": "web_search_20250305", "name": "web_search"}]
+
+    # ── Prompt Caching Anthropic ──────────────────────────────────────────
+    # Le system prompt est mis en cache côté Anthropic après le 1er appel.
+    # Coût cache hit : $0.30/1M tokens au lieu de $3.00/1M → ~10x moins cher.
+    # Le cache est valide 5 minutes (renouvelé automatiquement à chaque appel).
+    system_cached = [
+        {
+            "type": "text",
+            "text": SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"}
+        }
+    ]
+
+    for attempt in range(7):
+        try:
+            response = await client.messages.create(
+                model="claude-opus-4-5",
+                max_tokens=4000,
+                system=system_cached,
+                tools=tools,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            # Extraire uniquement les blocs texte (ignorer tool_use/tool_result)
+            text = ""
+            for block in response.content:
+                if hasattr(block, "type") and block.type == "text":
+                    text += block.text
+            return text if text else "Aucune reponse generee."
+        except Exception as e:
+            err = str(e)
+            logger.warning(f"Tentative {attempt+1}/5 - Erreur Claude : {err}")
+            if "529" in err or "overloaded" in err.lower() or "rate" in err.lower() or "529" in err or "quota" in err.lower():
+                wait = 20 * (attempt + 1)  # 20s, 40s, 60s, 80s, 100s
+                logger.info(f"Rate limit - attente {wait}s")
+                await asyncio.sleep(wait)
+                continue
+            return f"Erreur API Claude\n\n{err}\n\nReessaie dans quelques instants."
+    return "API temporairement surchargee - Reessaie dans 2 minutes."
 
 
 async def send_long(bot_or_context, chat_id: int, text: str, is_bot=False):
@@ -850,7 +878,7 @@ async def send_long(bot_or_context, chat_id: int, text: str, is_bot=False):
 
 
 async def run_module(update: Update, context: ContextTypes.DEFAULT_TYPE, module: str):
-    """Handler générique — envoie le message d'attente, génère, répond."""
+    """Handler générique — fonctionne pour commandes ET boutons inline."""
     titles = {
         "bilan": "Bilan N-1 + Arc de tendance",
         "calendrier": "Calendrier économique semaine",
@@ -873,8 +901,13 @@ async def run_module(update: Update, context: ContextTypes.DEFAULT_TYPE, module:
         "calendrier_mois": "Calendrier du mois",
         "analyse_mensuelle": "Analyse mensuelle complète",
     }
-    chat_id = update.effective_chat.id
     title = titles.get(module, module)
+
+    # Récupère le chat_id correctement selon le type d'update
+    if update.callback_query:
+        chat_id = update.callback_query.message.chat_id
+    else:
+        chat_id = update.effective_chat.id
 
     wait = await context.bot.send_message(
         chat_id=chat_id,
@@ -1067,8 +1100,13 @@ async def auto_mensuel(context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+async def main():
+    tz = pytz.timezone(TIMEZONE)
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("aide", cmd_aide))
@@ -1097,9 +1135,45 @@ def main():
     app.add_handler(CommandHandler("analyse_mensuelle", cmd_analyse_mensuelle))
     app.add_handler(CallbackQueryHandler(button_handler))
 
+    # ── Alertes automatiques ──────────────────────────────────────────────
+    if CHAT_ID and app.job_queue:
+        # Briefing 07h00 tous les jours du lundi au vendredi
+        app.job_queue.run_daily(
+            auto_briefing,
+            time=datetime.strptime("07:00", "%H:%M").replace(
+                tzinfo=tz
+            ).timetz(),
+            days=(0, 1, 2, 3, 4),
+            name="briefing_quotidien",
+        )
+        # Bilan 22h00 tous les jours du lundi au vendredi
+        app.job_queue.run_daily(
+            auto_bilan,
+            time=datetime.strptime("22:00", "%H:%M").replace(
+                tzinfo=tz
+            ).timetz(),
+            days=(0, 1, 2, 3, 4),
+            name="bilan_quotidien",
+        )
+        # Analyse mensuelle le 1er de chaque mois à 08h00
+        app.job_queue.run_monthly(
+            auto_mensuel,
+            when=datetime.strptime("08:00", "%H:%M").replace(
+                tzinfo=tz
+            ).timetz(),
+            day=1,
+            name="analyse_mensuelle_auto",
+        )
+        logger.info("✅ Alertes automatiques programmées")
+    else:
+        logger.warning("⚠️  CHAT_ID manquant ou job_queue indisponible — alertes auto désactivées")
+
     logger.info("Bot démarré")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
